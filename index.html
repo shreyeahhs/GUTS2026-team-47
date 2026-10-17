@@ -1,0 +1,1270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blink Duel</title>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js" defer></script>
+<style>
+  @font-face { font-family: "Virgil"; src: url("fonts/Virgil.woff2") format("woff2"); font-display: block; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #fff; color: #1e1e1e; }
+  [hidden] { display: none !important; }
+  #game { position: fixed; inset: 0; margin: auto; display: block; }
+  /* hide the video, its drawn on the canvas */
+  #cam { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+  /* menu */
+  #ui { position: fixed; left: 0; top: 0; width: 1280px; height: 720px; transform-origin: 0 0; pointer-events: none; font: 22px "Virgil", cursive; color: #1e1e1e; }
+  .box { position: absolute; left: 480px; top: 284px; width: 320px; display: grid; gap: 12px; text-align: center; pointer-events: auto; }
+  .sketch { background: #fff; color: inherit; font: inherit; padding: 9px 14px;
+            border: 2px solid #1e1e1e; border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px; }
+  button.sketch { cursor: pointer; }
+  button.sketch:hover { background: #f2f2f2; }
+  .row { display: grid; grid-template-columns: 1fr 100px; gap: 10px; }
+  .row input { min-width: 0; text-align: center; text-transform: uppercase; letter-spacing: .25em; outline: none; }
+  .hint { margin: 0; font-size: 17px; color: #777; }
+  .code { margin: 0; font-size: 64px; line-height: 1; letter-spacing: .15em; }
+
+  /* tune panel */
+  #panel { position: fixed; right: 20px; top: 50%; transform: translateY(-50%); width: min(260px, calc(100vw - 40px)); padding: 16px 18px; background: #fff; font: 16px "Virgil", cursive;
+           border: 2px solid #1e1e1e; border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px; }
+  #panel label { display: grid; grid-template-columns: 54px 1fr 20px; align-items: center; gap: 8px; margin: 10px 0; }
+  #panel input { width: 100%; accent-color: #1e1e1e; }
+  #panel button { width: 100%; margin-top: 6px; padding: 8px; background: #fff; color: #1e1e1e; font: inherit; cursor: pointer;
+                  border: 2px solid #1e1e1e; border-radius: 15px 225px 15px 255px / 255px 15px 225px 15px; }
+  #panel p { margin: 10px 0 0; font-size: 13px; color: #666; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<video id="cam" playsinline muted></video>
+
+<div id="ui">
+  <div id="menu" class="box">
+    <button id="solo" class="sketch">play vs computer</button>
+    <button id="host" class="sketch">create online room</button>
+    <div class="row"><input id="code" class="sketch" maxlength="4" placeholder="code" autocomplete="off" spellcheck="false"><button id="join" class="sketch">join</button></div>
+    <p class="hint">no webcam? press enter for keyboard</p>
+  </div>
+  <div id="lobby" class="box" hidden>
+    <p class="hint">room code</p>
+    <p id="roomCode" class="code">----</p>
+    <button id="copyLink" class="sketch">copy invite link</button>
+    <button id="cancel" class="sketch">cancel</button>
+  </div>
+</div>
+
+<div id="panel" hidden>
+  sensitivity
+  <label>blink <input id="blinkSens" type="range" min="1" max="10" step="1"><output id="blinkOut"></output></label>
+  <label>mouth <input id="mouthSens" type="range" min="1" max="10" step="1"><output id="mouthOut"></output></label>
+  <button id="recal">recalibrate</button>
+  <p>tracking: <span id="fps">-</span> checks/sec (20+ is good)<span id="pingRow" hidden><br>ping: <span id="ping">-</span> ms round trip</span></p>
+  <p>higher = triggers more easily. the tick on each meter is the trigger point. press T to close.</p>
+</div>
+
+<script type="module">
+import rough from "https://cdn.jsdelivr.net/npm/roughjs@4.6.6/bundled/rough.esm.js";
+
+// game size
+const W = 1280, H = 720, FEET = 585;
+const MAX_HP = 5;
+// slash timing
+const SLASH = { windup: 0.07, swing: 0.12, recover: 0.22, cooldown: 0.6 };
+const HIT_AT = SLASH.windup + SLASH.swing * 0.8;
+const LUNGE = 170;
+// shield runs out if you hold it
+const SHIELD_DRAIN = 1 / 3;
+const SHIELD_REGEN = 1 / 4;
+const SHIELD_BREAK = 1.5;
+const BLOCK_COST = 0.25;
+const HIT_STUN = 0.3, RECOIL_STUN = 0.35;
+const COUNTDOWN = 3, HOLD_TO_START = 1;
+
+const INK = "#1e1e1e", PAPER = "#ffffff", RED = "#e03131", FAINT = "rgba(30,30,30,.45)";
+const FONT = `"Virgil", "Segoe Print", "Comic Sans MS", cursive`;
+
+// layout from my sketch
+const FRAME = { x: 18, y: 16, w: 1244, h: 688, r: 46 };
+const AVATAR = [{ x: 84, y: 88 }, { x: 1196, y: 88 }], AVATAR_D = 86;
+const BAR = [{ x: 140, y: 70, w: 310, h: 36 }, { x: 830, y: 70, w: 310, h: 36 }];
+const VS = { x: 640, y: 372, d: 108 };
+const NOTE = { x: 52, y: 618, w: 1176, h: 70 };
+const PREVIEW = { w: 300, h: 169 };
+
+// stick figure sizes
+const HIP = -130, SHOULDER = -282, NECK = -322, HEAD_R = 46, LEG_SPREAD = 36;
+const ARM = 92, SWORD_LEN = 215;
+const SHIELD_W = 78, SHIELD_H = 236;
+const SHIELD_REST = { x: -128, y: -178 }, SHIELD_GUARD = { x: 120, y: -205 };
+const IDLE = -58, WIND = -160, FOLLOW = 45, LOWERED = 100;
+
+// face tracker model
+const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const ROOM_PREFIX = "blink-duel-7f3a-";
+// add a turn server here if wifi blocks online
+const TURN = [];
+const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }, ...TURN] };
+const BLOCKED = "this wifi blocks direct connections (eduroam does this). try both on a phone hotspot";
+const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+const $ = (id) => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = (t) => 1 - (1 - t) ** 3;
+const easeInOut = (t) => (t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2);
+const median = (a) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)];
+const DEG = Math.PI / 180;
+const polar = (deg, len) => [Math.cos(deg * DEG) * len, Math.sin(deg * DEG) * len];
+const add = (p, q) => [p[0] + q[0], p[1] + q[1]];
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : +v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+const sens = { blink: store.get("blinkSens", 5), mouth: store.get("mouthSens", 5) };
+
+// finds your face in the webcam
+async function createTracker() {
+  const { FaceLandmarker, FilesetResolver } = await import(`${MP}/vision_bundle.mjs`);
+  const files = await FilesetResolver.forVisionTasks(`${MP}/wasm`);
+  const make = (delegate) => FaceLandmarker.createFromOptions(files, {
+    baseOptions: { modelAssetPath: MODEL, delegate },
+    runningMode: "VIDEO",
+    numFaces: 1,
+    outputFaceBlendshapes: true,
+  });
+  let lm;
+  try { lm = await make("GPU"); }
+  catch (err) { console.warn("GPU face tracking unavailable, using CPU", err); lm = await make("CPU"); }
+
+  return (video, timeMs) => {
+    const res = lm.detectForVideo(video, timeMs);
+    const pts = res.faceLandmarks[0];
+    if (!pts) return null;
+    let x0 = 1, x1 = 0, y0 = 1, y1 = 0;
+    for (const p of pts) {
+      if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
+      if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y;
+    }
+    const scores = {};
+    for (const c of res.faceBlendshapes[0]?.categories ?? []) scores[c.categoryName] = c.score;
+    return { x0, x1, y0, y1, scores };
+  };
+}
+
+// turns face data into blink and mouth open
+class PlayerSense {
+  constructor() {
+    this.eyeBase = 0.1; this.jawBase = 0.02;
+    this.eyes = 0; this.jaw = 0;
+    this.present = false; this.lastSeen = -1e9;
+    this.closed = false; this.closedAt = 0; this.spoiled = false;
+    this.mouthOpen = false; this.mouthFrames = 0; this.mouthClosedAt = -1e9;
+    this.samples = null; this.onBlink = null;
+    this.recompute();
+  }
+  recompute() {
+    const b = (sens.blink - 1) / 9, m = (sens.mouth - 1) / 9;
+    this.blinkOn = clamp(this.eyeBase + lerp(0.42, 0.14, b), 0.2, 0.85);
+    this.blinkOff = this.eyeBase + (this.blinkOn - this.eyeBase) * 0.45;
+    this.jawOn = clamp(this.jawBase + lerp(0.35, 0.1, m), 0.1, 0.7);
+    this.jawOff = this.jawBase + (this.jawOn - this.jawBase) * 0.5;
+  }
+  startCalibration() { this.samples = { eyes: [], jaw: [] }; }
+  finishCalibration() {
+    if (this.samples?.eyes.length >= 15) {
+      this.eyeBase = clamp(median(this.samples.eyes), 0, 0.45);
+      this.jawBase = clamp(median(this.samples.jaw), 0, 0.2);
+      this.recompute();
+    }
+    this.samples = null;
+  }
+  update(scores, now) {
+    if (!scores) {
+      if (now - this.lastSeen > 400) {
+        this.present = false; this.closed = false; this.mouthOpen = false;
+        this.mouthFrames = 0; this.eyes = 0; this.jaw = 0;
+      }
+      return;
+    }
+    this.present = true; this.lastSeen = now;
+    this.eyes = ((scores.eyeBlinkLeft ?? 0) + (scores.eyeBlinkRight ?? 0)) / 2;
+    this.jaw = 0.4 * this.jaw + 0.6 * (scores.jawOpen ?? 0);
+    this.samples?.eyes.push(this.eyes);
+    this.samples?.jaw.push(this.jaw);
+
+    // mouth open = shield
+    if (!this.mouthOpen) {
+      this.mouthFrames = this.jaw > this.jawOn ? this.mouthFrames + 1 : 0;
+      if (this.mouthFrames >= 2) this.mouthOpen = true;
+    } else if (this.jaw < this.jawOff) {
+      this.mouthOpen = false; this.mouthFrames = 0; this.mouthClosedAt = now;
+    }
+
+    // blink = slash
+    if (!this.closed) {
+      if (this.eyes > this.blinkOn) {
+        this.closed = true; this.closedAt = now;
+        this.spoiled = this.mouthOpen || now - this.mouthClosedAt < 250;
+      }
+    } else {
+      if (this.mouthOpen || this.jaw > this.jawOn) this.spoiled = true;
+      if (this.eyes < this.blinkOff) {
+        this.closed = false;
+        if (!this.spoiled && now - this.closedAt < 1000) this.onBlink?.();
+      }
+    }
+  }
+}
+
+// solo or online
+let mode = null;
+let input = null;
+let me = 0;
+const remote = { present: false, closed: false, mouthOpen: false, intent: false, img: null, seq: -1 };
+
+function online() { return mode === "online"; }
+function isCpu(i) { return mode === "solo" && i !== me; }
+function isLocal(i) { return !online() || i === me; }
+function isPresent(i) {
+  if (isCpu(i)) return true;
+  if (!isLocal(i)) return remote.present;
+  return input !== "camera" || sense.present;
+}
+function wantsShield(i) {
+  if (isCpu(i)) return cpu.shield;
+  return shieldKeys.size > 0 || (input === "camera" && sense.mouthOpen);
+}
+function intentOf(i) { return isLocal(i) ? wantsShield(i) : remote.intent; }
+function faceOf(i) {
+  if (isCpu(i)) return null;
+  if (!isLocal(i)) return { closed: remote.closed, open: remote.mouthOpen };
+  if (input === "camera") return { closed: sense.closed, open: sense.mouthOpen };
+  return null;
+}
+
+// the stick guy
+class Fighter {
+  constructor(i) {
+    this.i = i; this.dir = i === 0 ? 1 : -1; this.homeX = i === 0 ? 370 : 910;
+    this.reset();
+  }
+  reset() {
+    Object.assign(this, {
+      hp: MAX_HP, state: "idle", t: 0, cool: 0, stun: 0, stamina: 1, broken: 0, guard: 0,
+      flash: 0, knock: 0, ko: 0, hitDone: false, wantShield: false, x: this.homeX,
+    });
+  }
+  // gonna make the stick slash
+  slash() {
+    if (this.state !== "idle" || this.cool > 0 || this.stun > 0 || this.hp <= 0) return false;
+    this.state = "slash"; this.t = 0; this.cool = SLASH.cooldown; this.hitDone = false;
+    return true;
+  }
+  update(dt, foe) {
+    this.cool -= dt; this.stun -= dt; this.flash -= dt; this.broken -= dt;
+    this.knock *= 0.0005 ** dt;
+    if (this.hp <= 0) { this.ko += dt; this.state = "idle"; }
+
+    if (this.state === "slash") {
+      this.t += dt;
+      if (!this.hitDone && this.t >= HIT_AT) { this.hitDone = true; resolveHit(this, foe); }
+      if (this.t >= SLASH.windup + SLASH.swing + SLASH.recover) { this.state = "idle"; this.t = 0; }
+    } else if (!isLocal(this.i)) {
+      if (this.state === "shield") this.t += dt;
+    } else if (this.state === "shield") {
+      this.t += dt;
+      this.stamina -= SHIELD_DRAIN * dt;
+      if (this.stamina <= 0) {
+        this.stamina = 0; this.state = "idle"; this.broken = SHIELD_BREAK;
+        floatText("shield broken", this.x, FEET - 440, RED, 30);
+      } else if (!this.wantShield || this.stun > 0) {
+        this.state = "idle";
+      }
+    } else {
+      this.stamina = Math.min(1, this.stamina + SHIELD_REGEN * dt);
+      if (this.wantShield && this.stun <= 0 && this.broken <= 0 && this.hp > 0) {
+        this.state = "shield"; this.t = 0;
+      }
+    }
+    this.guard = clamp(this.guard + (this.state === "shield" ? dt : -dt) / 0.12, 0, 1);
+    const lunge = this.state === "slash" ? lungeOf(this.t) : 0;
+    this.x = this.homeX + this.dir * (lunge + this.knock);
+  }
+}
+
+function lungeOf(t) {
+  const { windup, swing, recover } = SLASH;
+  if (t < windup) return -12 * (t / windup);
+  if (t < windup + swing) return lerp(-12, LUNGE, easeOut((t - windup) / swing));
+  return lerp(LUNGE, 0, easeInOut(clamp((t - windup - swing) / recover, 0, 1)));
+}
+
+function swordAngle(f, now) {
+  if (f.swordAt !== undefined) return f.swordAt;
+  if (phase === "over" && f.i === winner) return -88 + Math.sin(now * 5) * 6;
+  if (isCpu(f.i) && cpu.tell > 0) return lerp(IDLE, -140, easeOut(clamp((cpu.tellLen - cpu.tell) / 0.15, 0, 1)));
+  if (f.state !== "slash") return IDLE + Math.sin(now * 2.2 + f.i) * 4;
+  const { windup, swing, recover } = SLASH, t = f.t;
+  if (t < windup) return lerp(IDLE, WIND, easeOut(t / windup));
+  if (t < windup + swing) return lerp(WIND, FOLLOW, (t - windup) / swing);
+  return lerp(FOLLOW, IDLE, easeInOut(clamp((t - windup - swing) / recover, 0, 1)));
+}
+
+function doSlash(i) {
+  if (!isLocal(i) || !fighters[i].slash()) return;
+  if (online()) netSend({ k: "slash" });
+}
+
+// checks if the hit landed or got blocked
+function resolveHit(att, def) {
+  if (phase !== "fight" || def.hp <= 0 || !isLocal(def.i)) return;
+  const blocked = def.state === "shield";
+  if (blocked) def.stamina = Math.max(0, def.stamina - BLOCK_COST);
+  else def.hp -= 1;
+  showHit(att, def, blocked);
+  if (blocked && isCpu(def.i)) cpuBlocked();
+  if (online()) netSend({ k: "verdict", blocked, hp: def.hp, st: def.stamina });
+  if (def.hp <= 0) endGame(att.i);
+}
+
+// hit and block effects
+function showHit(att, def, blocked) {
+  if (blocked) {
+    att.stun = RECOIL_STUN; att.knock = -40; def.knock = -12;
+    const sx = def.x + def.dir * SHIELD_GUARD.x, sy = FEET + SHIELD_GUARD.y;
+    sparks(sx, sy);
+    floatText("blocked!", sx, sy - 150, INK, 34);
+    shake = Math.max(shake, 6);
+  } else {
+    def.flash = 0.45; def.stun = HIT_STUN; def.knock = -50;
+    fx.pops.push({ x: def.x, y: FEET - 230, life: 0.45 });
+    floatText("hit!", def.x, FEET - 440, RED, 38);
+    shake = Math.max(shake, 12);
+  }
+}
+
+const sense = new PlayerSense();
+const fighters = [new Fighter(0), new Fighter(1)];
+const shieldKeys = new Set();
+const fx = { texts: [], sparks: [], pops: [] };
+let phase = "intro";
+let phaseT = 0, holdT = 0, lostT = 0, backT = 0, fightT = 0, shake = 0, winner = -1;
+let tracker = null, lastVideoTime = -1, faces = [null, null], note = "";
+
+sense.onBlink = () => { if (phase === "fight" || phase === "waiting") doSlash(me); };
+
+function floatText(str, x, y, color, size) { fx.texts.push({ str, x, y, color, size, life: 1.1 }); }
+function sparks(x, y) {
+  for (let n = 0; n < 14; n++) {
+    const a = Math.random() * Math.PI * 2, v = 250 + Math.random() * 400;
+    fx.sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 150, life: 0.3 + Math.random() * 0.25 });
+  }
+}
+
+function newMatch() {
+  fighters.forEach((f) => f.reset());
+  fx.texts.length = fx.sparks.length = fx.pops.length = 0;
+  winner = -1;
+  cpuReset();
+  goCountdown();
+}
+function startMatch() {
+  newMatch();
+  if (online()) netSend({ k: "start" });
+}
+function goCountdown() {
+  phase = "countdown"; phaseT = 0; holdT = 0;
+  if (input === "camera") sense.startCalibration();
+}
+function endGame(w) {
+  if (phase === "over") return;
+  phase = "over"; winner = w; holdT = 0;
+}
+
+// runs every frame
+function update(dt) {
+  const present = [0, 1].map(isPresent);
+  const intent = [0, 1].map(intentOf);
+  const active = phase === "fight" || phase === "waiting";
+  if (mode === "solo") cpuThink(dt);
+  fighters.forEach((f, i) => {
+    if (isLocal(i)) f.wantShield = active && wantsShield(i);
+    f.update(dt, fighters[1 - i]);
+  });
+  fightT += dt;
+
+  // open mouth to start
+  if (phase === "waiting" || phase === "over") {
+    const ready = [0, 1].every((i) => isCpu(i) || (present[i] && intent[i]));
+    holdT = ready ? Math.min(HOLD_TO_START, holdT + dt) : Math.max(0, holdT - dt * 2);
+    if (holdT >= HOLD_TO_START && (!online() || net.isHost)) startMatch();
+  } else if (phase === "countdown") {
+    phaseT += dt;
+    if (mode === "solo" && !present[me]) {
+      phase = "waiting"; holdT = 0;
+      sense.samples = null;
+    } else if (phaseT >= COUNTDOWN) {
+      if (input === "camera") sense.finishCalibration();
+      phase = "fight"; lostT = 0; fightT = 0;
+    }
+  } else if (phase === "fight") {
+    lostT = present[0] && present[1] ? 0 : lostT + dt;
+    if (lostT > 0.7) { phase = "paused"; backT = 0; }
+  } else if (phase === "paused") {
+    backT = present[0] && present[1] ? backT + dt : 0;
+    if (backT > 0.5) { phase = "fight"; lostT = 0; fightT = 0; }
+  }
+  if (online() && net.fast && performance.now() - net.heard > 5000) leaveOnline("lost the connection to your opponent");
+
+  for (const t of fx.texts) { t.life -= dt; t.y -= 35 * dt; }
+  for (const s of fx.sparks) { s.life -= dt; s.vy += 1100 * dt; s.x += s.vx * dt; s.y += s.vy * dt; }
+  for (const p of fx.pops) p.life -= dt;
+  for (const k of ["texts", "sparks", "pops"]) fx[k] = fx[k].filter((e) => e.life > 0);
+  shake *= 0.0004 ** dt;
+}
+
+// computer player
+const cpu = { shield: false, tell: 0, tellLen: 1, attackIn: 0, guard: 0, blockIn: -1, hunchIn: 0, punish: false, sawSlash: false, swings: [], clock: 0 };
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function cpuReset() {
+  Object.assign(cpu, { shield: false, tell: 0, attackIn: rand(1.2, 2), guard: 0, blockIn: -1, hunchIn: rand(1.5, 3), punish: false, sawSlash: false, swings: [] });
+}
+
+// computer decides what to do
+function cpuThink(dt) {
+  const f = fighters[1 - me], foe = fighters[me];
+  if (phase !== "fight" || f.hp <= 0 || foe.hp <= 0) { cpu.shield = false; cpu.tell = 0; return; }
+  cpu.clock += dt;
+
+  if (foe.state === "slash" && !cpu.sawSlash) {
+    cpu.sawSlash = true;
+    cpu.swings = cpu.swings.filter((at) => cpu.clock - at < 3).concat(cpu.clock);
+    if (cpu.tell <= 0 && Math.random() < Math.min(0.75, 0.2 + 0.15 * cpu.swings.length)) cpu.blockIn = rand(0.04, 0.12);
+  }
+  if (foe.state !== "slash") cpu.sawSlash = false;
+  if (cpu.blockIn >= 0 && (cpu.blockIn -= dt) < 0) cpu.guard = Math.max(cpu.guard, 0.28);
+  if ((cpu.hunchIn -= dt) <= 0) {
+    cpu.hunchIn = rand(1.8, 3.5);
+    if (cpu.tell <= 0 && f.stamina > 0.5) cpu.guard = Math.max(cpu.guard, rand(0.5, 1.1));
+  }
+
+  if (foe.broken > 0) cpu.attackIn = Math.min(cpu.attackIn, 0.2);
+
+  const strike = () => {
+    if (f.slash()) Object.assign(cpu, { attackIn: rand(0.9, 2.2), punish: false });
+    else cpu.attackIn = rand(0.3, 0.6);
+  };
+  // it frowns before attacking so you can block
+  if (cpu.tell > 0) {
+    if (f.stun > 0) Object.assign(cpu, { tell: 0, attackIn: rand(0.6, 1.2) });
+    else if ((cpu.tell -= dt) <= 0) strike();
+  } else if (cpu.guard <= 0 && f.state === "idle" && f.cool <= 0 && f.stun <= 0 && (cpu.attackIn -= dt) <= 0) {
+    if (cpu.punish) strike();
+    else if (foe.state === "shield" && foe.stamina > 0.3 && Math.random() < 0.75) cpu.attackIn = rand(0.3, 0.6);
+    else cpu.tell = cpu.tellLen = rand(0.45, 0.6);
+  }
+  cpu.guard -= dt;
+  cpu.shield = cpu.guard > 0 && cpu.tell <= 0 && f.stamina > 0.12;
+}
+
+// hits back after blocking you
+function cpuBlocked() {
+  const spamming = cpu.swings.filter((at) => cpu.clock - at < 3).length >= 3;
+  if (Math.random() < (spamming ? 0.9 : 0.65)) Object.assign(cpu, { guard: 0, attackIn: 0, punish: true });
+}
+
+// online stuff
+const net = { peer: null, conn: null, fast: null, isHost: false, code: "", rtt: 0, heard: 0, seq: 0, pinger: 0, faceAt: 0 };
+
+function netSend(msg) { if (net.conn?.open) net.conn.send(msg); }
+function netSendFast(msg) { if (net.fast?.readyState === "open") net.fast.send(JSON.stringify(msg)); }
+
+// make a room
+function hostRoom() {
+  net.isHost = true; me = 0;
+  const open = () => {
+    net.code = Array.from({ length: 4 }, () => CODE_CHARS[(Math.random() * CODE_CHARS.length) | 0]).join("");
+    const peer = (net.peer = new Peer(ROOM_PREFIX + net.code, { config: ICE }));
+    peer.on("open", () => { phase = "lobby"; note = ""; $("roomCode").textContent = net.code; showUi("lobby"); });
+    peer.on("connection", (conn) => (net.conn ? conn.on("open", () => conn.close()) : attach(conn)));
+    peer.on("disconnected", () => { if (phase === "lobby" && !peer.destroyed) peer.reconnect(); });
+    peer.on("error", (err) => {
+      if (err.type === "unavailable-id") { peer.destroy(); open(); }
+      else if (phase === "lobby" && (err.type === "network" || err.type === "server-error")) note = "lost the matchmaking server, reconnecting...";
+      else netFail(err);
+    });
+  };
+  open();
+}
+
+// join with a code
+function joinRoom(code) {
+  net.isHost = false; me = 1; net.code = code;
+  phase = "connecting"; note = `joining room ${code}...`;
+  const peer = (net.peer = new Peer({ config: ICE }));
+  peer.on("open", () => {
+    note = `found room ${code}, linking the two devices...`;
+    attach(peer.connect(ROOM_PREFIX + code, { reliable: true, serialization: "json" }));
+  });
+  peer.on("error", netFail);
+}
+
+function watchLink(conn) {
+  const pc = conn.peerConnection;
+  const fail = (why) => {
+    if (net.conn !== conn || net.fast) return;
+    if (net.isHost) { net.conn = null; conn.close(); note = `player 2 couldn't connect: ${why}`; }
+    else leaveOnline(`couldn't connect: ${why}`);
+  };
+  pc?.addEventListener("iceconnectionstatechange", () => { if (pc.iceConnectionState === "failed") fail(BLOCKED); });
+  setTimeout(() => {
+    if (!net.isHost && pc?.signalingState === "have-local-offer") fail("the host's game didn't answer. keep their room open and try again");
+    else fail(BLOCKED);
+  }, 20000);
+}
+
+function attach(conn) {
+  net.conn = conn;
+  watchLink(conn);
+  conn.on("open", () => {
+    net.fast = conn.peerConnection.createDataChannel("state", { negotiated: true, id: 101, ordered: false, maxRetransmits: 0 });
+    net.fast.onmessage = (e) => onFast(JSON.parse(e.data));
+    net.heard = performance.now(); remote.seq = -1;
+    net.pinger = setInterval(() => netSend({ k: "ping", t: performance.now() }), 1000);
+    fighters.forEach((f) => f.reset());
+    phase = "waiting"; holdT = 0; note = ""; showUi(null);
+  });
+  conn.on("data", onEvent);
+  conn.on("close", () => {
+    if (net.conn !== conn) return;
+    if (net.fast) leaveOnline("your opponent left");
+    else if (net.isHost) net.conn = null;
+    else leaveOnline("couldn't connect, try again");
+  });
+  conn.on("error", () => { if (net.fast) leaveOnline("connection problem, try again"); });
+}
+
+function onEvent(msg) {
+  net.heard = performance.now();
+  const them = fighters[1 - me];
+  switch (msg.k) {
+    case "ping": netSend({ k: "pong", t: msg.t }); break;
+    case "pong": { const rtt = performance.now() - msg.t; net.rtt = net.rtt ? lerp(net.rtt, rtt, 0.3) : rtt; break; }
+    case "slash":
+      if (phase === "fight" || phase === "waiting" || phase === "countdown") {
+        them.state = "slash"; them.t = Math.min(net.rtt / 2000, 0.08); them.hitDone = false;
+      }
+      break;
+    case "verdict":
+      if (phase === "over" && !msg.blocked && msg.hp <= 0) { them.hp = 0; winner = -1; break; }
+      if (phase !== "fight") break;
+      them.hp = msg.hp; them.stamina = msg.st;
+      showHit(fighters[me], them, msg.blocked);
+      if (them.hp <= 0) endGame(me);
+      break;
+    case "start": if (!net.isHost) newMatch(); break;
+    case "rematch": if (net.isHost && phase === "over") startMatch(); break;
+  }
+}
+
+function onFast(msg) {
+  net.heard = performance.now();
+  if (msg.img !== undefined) {
+    const im = new Image(); im.onload = () => (remote.img = im); im.src = msg.img;
+    return;
+  }
+  if (msg.s <= remote.seq) return;
+  remote.seq = msg.s;
+  Object.assign(remote, { present: msg.pr, closed: msg.cl, mouthOpen: msg.mo, intent: msg.in });
+  const f = fighters[1 - me];
+  f.hp = phase === "fight" ? Math.min(f.hp, msg.hp) : msg.hp;
+  f.stamina = msg.st; f.broken = msg.br;
+  if (msg.sh && f.state === "idle" && f.hp > 0) { f.state = "shield"; f.t = 0; }
+  else if (!msg.sh && f.state === "shield") f.state = "idle";
+}
+
+const thumb = Object.assign(document.createElement("canvas"), { width: 72, height: 72 });
+// send my state to the other player
+function sendState(now) {
+  const f = fighters[me], cam = input === "camera";
+  netSendFast({
+    s: ++net.seq, hp: f.hp, sh: f.state === "shield", st: +f.stamina.toFixed(2), br: f.broken > 0 ? +f.broken.toFixed(2) : 0,
+    pr: isPresent(me), cl: cam && sense.closed, mo: cam ? sense.mouthOpen : f.state === "shield", in: wantsShield(me),
+  });
+  const c = crops[me];
+  if (cam && c && sense.present && now - net.faceAt > 250) {
+    net.faceAt = now;
+    const x = thumb.getContext("2d");
+    x.save(); x.filter = "grayscale(1) contrast(1.1)"; x.translate(72, 0); x.scale(-1, 1);
+    x.drawImage(video, c.cx - c.s / 2, c.cy - c.s / 2, c.s, c.s, 0, 0, 72, 72);
+    x.restore();
+    netSendFast({ img: thumb.toDataURL("image/jpeg", 0.6) });
+  }
+}
+
+function netFail(err) {
+  const why = {
+    "peer-unavailable": `no room with code ${net.code}, check the code`,
+    network: "can't reach the matchmaking server, check your internet",
+    "server-error": "the matchmaking server had a problem, try again",
+    "browser-incompatible": "this browser can't do peer to peer, try chrome or edge",
+  }[err.type] || `connection failed (${err.type || err})`;
+  leaveOnline(why);
+}
+
+function leaveOnline(why) {
+  if (!online()) return;
+  mode = null;
+  clearInterval(net.pinger);
+  try { net.peer?.destroy(); } catch {}
+  Object.assign(net, { peer: null, conn: null, fast: null, code: "", rtt: 0 });
+  Object.assign(remote, { present: false, closed: false, mouthOpen: false, intent: false, img: null, seq: -1 });
+  fighters.forEach((f) => f.reset());
+  phase = "menu"; note = why; showUi("menu");
+}
+
+const canvas = $("game"), ctx = canvas.getContext("2d"), video = $("cam");
+const rc = rough.canvas(canvas);
+const crops = [null, null];
+let view = 1;
+
+const pen = (seed, o = {}) => ({ stroke: INK, strokeWidth: 2, roughness: 1.2, bowing: 0.8, seed, ...o });
+const hatch = (seed, o = {}) => pen(seed, { stroke: "none", fill: INK, fillStyle: "hachure", hachureGap: 7, hachureAngle: -41, fillWeight: 1.4, ...o });
+
+function resize() {
+  const s = Math.min(innerWidth / W, innerHeight / H), dpr = window.devicePixelRatio || 1;
+  canvas.style.width = `${W * s}px`; canvas.style.height = `${H * s}px`;
+  canvas.width = Math.round(W * s * dpr); canvas.height = Math.round(H * s * dpr);
+  view = s * dpr;
+  $("ui").style.transform = `translate(${(innerWidth - W * s) / 2}px, ${(innerHeight - H * s) / 2}px) scale(${s})`;
+}
+
+function roundRect(x, y, w, h, r) {
+  return `M${x + r} ${y} H${x + w - r} Q${x + w} ${y} ${x + w} ${y + r} V${y + h - r} Q${x + w} ${y + h} ${x + w - r} ${y + h}`
+       + ` H${x + r} Q${x} ${y + h} ${x} ${y + h - r} V${y + r} Q${x} ${y} ${x + r} ${y} Z`;
+}
+function write(str, x, y, size, color = INK, align = "center") {
+  ctx.font = `${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.lineJoin = "round"; ctx.lineWidth = 7; ctx.strokeStyle = PAPER; ctx.strokeText(str, x, y);
+  ctx.fillStyle = color; ctx.fillText(str, x, y);
+}
+
+// corner circles
+function drawCorners() {
+  fighters.forEach((f, i) => {
+    const a = AVATAR[i], d = AVATAR_D, crop = crops[i];
+    ctx.save();
+    ctx.beginPath(); ctx.arc(a.x, a.y, d / 2 - 3, 0, Math.PI * 2); ctx.clip();
+    if (isCpu(i)) {
+      write("cpu", a.x, a.y + 2, 26);
+    } else if (!isLocal(i)) {
+      if (remote.img && remote.present) ctx.drawImage(remote.img, a.x - d / 2, a.y - d / 2, d, d);
+      else write(remote.present ? `P${i + 1}` : "?", a.x, a.y + 2, 28, remote.present ? INK : FAINT);
+    } else if (input === "camera" && crop && sense.present) {
+      ctx.filter = "grayscale(1) contrast(1.1)";
+      ctx.translate(a.x, a.y); ctx.scale(-1, 1);
+      ctx.drawImage(video, crop.cx - crop.s / 2, crop.cy - crop.s / 2, crop.s, crop.s, -d / 2, -d / 2, d, d);
+    } else {
+      write(input === "camera" ? "?" : `P${i + 1}`, a.x, a.y + 2, 28, input === "camera" ? FAINT : INK);
+    }
+    ctx.restore();
+    rc.circle(a.x, a.y, d, pen(10 + i, { strokeWidth: 2.2 }));
+    if (mode && i === me) write("you", a.x, a.y + 62, 18, FAINT);
+
+    // for the health bar
+    const b = BAR[i], path = roundRect(b.x, b.y, b.w, b.h, 10);
+    const fw = (b.w - 8) * (Math.max(0, f.hp) / MAX_HP);
+    if (fw > 0) {
+      ctx.save(); ctx.clip(new Path2D(path));
+      rc.rectangle(i === 0 ? b.x + 4 : b.x + b.w - 4 - fw, b.y + 4, fw, b.h - 8, hatch(20 + i, f.flash > 0 ? { fill: RED } : {}));
+      ctx.restore();
+    }
+    rc.path(path, pen(30 + i, { stroke: f.flash > 0 ? RED : INK }));
+  });
+  if (online() && net.conn) write(`room ${net.code} (${Math.round(net.rtt)} ms)`, W / 2, 88, 18, FAINT);
+}
+
+// vs circle
+function drawCenter() {
+  if (phase === "menu" || phase === "lobby") return;
+  if (phase === "waiting" && input === "camera") return drawPreview();
+  let text = "vs", size = 34;
+  if (phase === "loading" || phase === "connecting") text = "...";
+  else if (phase === "countdown") { text = String(Math.max(1, Math.ceil(COUNTDOWN - phaseT))); size = 54; }
+  else if (phase === "fight" && fightT < 0.8) { text = "fight!"; size = 28; }
+  else if (phase === "paused") { text = "?"; size = 48; }
+  else if (phase === "over") text = "K.O.";
+  rc.circle(VS.x, VS.y, VS.d, pen(40, { strokeWidth: 2.2 }));
+  write(text, VS.x, VS.y + 2, size);
+}
+
+function drawPreview() {
+  const w = PREVIEW.w, h = PREVIEW.h, x = VS.x - w / 2, y = VS.y - h / 2 - 10;
+  if (video.videoWidth) {
+    const vw = video.videoWidth, vh = video.videoHeight, aspect = w / h;
+    let sx = 0, sy = 0, sw = vw, sh = vh;
+    if (vw / vh > aspect) { sw = vh * aspect; sx = (vw - sw) / 2; } else { sh = vw / aspect; sy = (vh - sh) / 2; }
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.filter = "grayscale(1) contrast(1.1)";
+    ctx.translate(x + w, y); ctx.scale(-1, 1);
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+    ctx.restore();
+    faces.forEach((face) => {
+      if (!face) return;
+      const fx0 = x + w - ((face.x1 * vw - sx) / sw) * w, fx1 = x + w - ((face.x0 * vw - sx) / sw) * w;
+      const fy0 = y + ((face.y0 * vh - sy) / sh) * h, fy1 = y + ((face.y1 * vh - sy) / sh) * h;
+      ctx.strokeStyle = PAPER; ctx.lineWidth = 2; ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+    });
+  }
+  write("you", x + 26, y + 20, 20);
+  rc.rectangle(x, y, w, h, pen(41, { strokeWidth: 2.2 }));
+}
+
+// draws the stick figure
+function drawFighter(f, now) {
+  const color = f.flash > 0 ? RED : INK;
+  ctx.save();
+  ctx.translate(f.x, FEET - (f.lift || 0));
+  ctx.scale(f.dir, 1);
+  if (f.ko > 0) ctx.rotate(easeOut(clamp(f.ko / 0.6, 0, 1)) * 1.45);
+  const s = f.i * 100;
+  const o = (n, extra) => pen(s + n, { stroke: color, strokeWidth: f.shadow ? 4.6 : 2.4, ...extra });
+
+  const bob = f.ko <= 0 && f.state === "idle" ? Math.sin(now * 3 + f.i * 2) * 3 : 0;
+  const lunge = f.state === "slash" ? lungeOf(f.t) : 0;
+  const lean = clamp(lunge / LUNGE, -0.1, 1) * 28;
+  const hip = [lean * 0.2, HIP + bob], neck = [lean, NECK + bob];
+  const shoulder = [lerp(hip[0], neck[0], (SHOULDER - HIP) / (NECK - HIP)), SHOULDER + bob];
+  const head = [neck[0] + lean * 0.3, NECK - HEAD_R + bob];
+  const step = Math.max(0, lunge) * 0.25;
+
+  rc.line(...hip, -LEG_SPREAD, 0, o(1));
+  rc.line(...hip, LEG_SPREAD + step, 0, o(2));
+  rc.line(...hip, ...neck, o(3));
+  rc.circle(...head, HEAD_R * 2, o(4, { fill: f.shadow ? INK : PAPER, fillStyle: "solid" }));
+  if (!f.shadow) drawFace(f, head);
+
+  const g = easeOut(f.guard);
+  const sc = [lerp(SHIELD_REST.x, SHIELD_GUARD.x, g), lerp(SHIELD_REST.y, SHIELD_GUARD.y, g)];
+  const grip = [sc[0] + (SHIELD_W / 2) * (1 - 2 * g), sc[1]];
+  if (f.ko <= 0) {
+    rc.line(...shoulder, ...grip, o(5));
+    drawShield(f, sc, color, s);
+  }
+
+  let th = lerp(swordAngle(f, now), LOWERED, g);
+  if (f.ko > 0) th = LOWERED;
+  const armAngle = lerp(th * 0.45 + 40, 75, g);
+  const hand = add(shoulder, polar(armAngle, ARM));
+  rc.line(...shoulder, ...hand, o(6));
+  if (f.ko <= 0) drawSword(f, shoulder, hand, th, color, s);
+  ctx.restore();
+}
+
+// face copies yours
+function drawFace(f, [hx, hy]) {
+  const face = faceOf(f.i);
+  const blinking = face ? face.closed : f.state === "slash" && f.t < 0.12;
+  const mouthOpen = f.state === "shield" || (face?.open ?? false);
+  ctx.save();
+  ctx.strokeStyle = INK; ctx.fillStyle = INK; ctx.lineWidth = 3; ctx.lineCap = "round";
+  const seg = (x0, y0, x1, y1) => { ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); };
+  for (const ex of [6, 24]) {
+    const x = hx + ex, y = hy - 8;
+    if (f.ko > 0) { seg(x - 5, y - 5, x + 5, y + 5); seg(x - 5, y + 5, x + 5, y - 5); }
+    else if (blinking) seg(x - 5, y, x + 5, y);
+    else { ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill(); }
+  }
+  if (isCpu(f.i) && cpu.tell > 0) { seg(hx + 1, hy - 21, hx + 12, hy - 15); seg(hx + 18, hy - 15, hx + 29, hy - 21); }
+  if (mouthOpen) { ctx.beginPath(); ctx.ellipse(hx + 15, hy + 18, 6, 8, 0, 0, Math.PI * 2); ctx.fill(); }
+  else seg(hx + 8, hy + 18, hx + 22, hy + 18);
+  ctx.restore();
+}
+
+function drawShield(f, [cx, cy], color, s) {
+  const hw = SHIELD_W / 2, hh = SHIELD_H / 2;
+  const pts = [[cx, cy - hh], [cx + hw, cy], [cx, cy + hh], [cx - hw, cy]];
+  if (f.shadow) return rc.polygon(pts, pen(s + 8, { strokeWidth: 3, fill: INK, fillStyle: "solid" }));
+  const broken = f.broken > 0;
+  if (f.guard > 0.3 && !broken && f.stamina > 0.02 && !(f.stamina < 0.3 && Math.floor(performance.now() / 110) % 2)) {
+    const top = cy + hh - SHIELD_H * f.stamina;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(cx - hw - 4, top, SHIELD_W + 8, SHIELD_H); ctx.clip();
+    rc.polygon(pts, hatch(s + 7, { hachureGap: 9, fillWeight: 1.2 }));
+    ctx.restore();
+  }
+  rc.polygon(pts, pen(s + 8, { stroke: broken ? FAINT : color, strokeWidth: 2.4, strokeLineDash: broken ? [8, 10] : undefined }));
+}
+
+function drawSword(f, shoulder, hand, th, color, s) {
+  if (f.state === "slash" && f.t >= SLASH.windup) {
+    const fade = 1 - clamp((f.t - SLASH.windup - SLASH.swing) / 0.12, 0, 1);
+    if (fade > 0) {
+      const end = (f.t < SLASH.windup + SLASH.swing ? th : FOLLOW) * DEG;
+      ctx.save(); ctx.globalAlpha = 0.6 * fade;
+      for (const [r, n] of [[250, 11], [222, 12], [194, 13]]) {
+        rc.arc(...shoulder, r * 2, r * 2, WIND * DEG, end, false, pen(s + n, { strokeWidth: 1.4, roughness: 1.6 }));
+      }
+      ctx.restore();
+    }
+  }
+  const at = (d, side = 0) => { const [bx, by] = polar(th, 1); return [hand[0] + bx * d - by * side, hand[1] + by * d + bx * side]; };
+  const width = f.shadow ? 4.2 : 2.6;
+  rc.line(...at(-14), ...at(SWORD_LEN), pen(s + 9, { stroke: color, strokeWidth: width }));
+  rc.line(...at(12, -17), ...at(12, 17), pen(s + 10, { stroke: color, strokeWidth: width }));
+}
+
+function drawFx() {
+  for (const p of fx.pops) {
+    const k = 1 - p.life / 0.45;
+    ctx.save(); ctx.globalAlpha = clamp(p.life / 0.25, 0, 1);
+    for (let a = 0; a < 8; a++) {
+      const ang = a * 45 + 20, r0 = 40 + 60 * k;
+      rc.line(...add([p.x, p.y], polar(ang, r0)), ...add([p.x, p.y], polar(ang, r0 + 34)), pen(60 + a, { stroke: RED, strokeWidth: 2.4 }));
+    }
+    ctx.restore();
+  }
+  ctx.strokeStyle = INK; ctx.lineWidth = 2.2; ctx.lineCap = "round";
+  for (const sp of fx.sparks) {
+    ctx.globalAlpha = clamp(sp.life * 3, 0, 1);
+    ctx.beginPath(); ctx.moveTo(sp.x, sp.y); ctx.lineTo(sp.x - sp.vx * 0.03, sp.y - sp.vy * 0.03); ctx.stroke();
+  }
+  for (const t of fx.texts) { ctx.globalAlpha = clamp(t.life * 2, 0, 1); write(t.str, t.x, t.y, t.size, t.color); }
+  ctx.globalAlpha = 1;
+}
+
+// bottom bar text
+function noteText() {
+  const camera = input === "camera";
+  const name = (i) => (i === me ? (camera ? "your face" : "you") : "your opponent");
+  const missing = [0, 1].filter((i) => !isPresent(i)).map(name);
+  switch (phase) {
+    case "menu": return note || "blink to slash -- open mouth to defend";
+    case "loading": case "connecting": return note;
+    case "lobby": return note || `room ${net.code}: send the code or link to player 2, then wait here`;
+    case "waiting":
+      if (missing.length) return `waiting for ${missing.join(" and ")}${camera ? ", sit facing the webcam" : ""}`;
+      if (!online()) return camera ? "open your mouth for a second to start" : "hold S to start";
+      return camera ? "both open your mouth to start" : "hold S to start (your opponent opens their mouth)";
+    case "countdown": return camera ? "hold still, eyes open and mouth closed" : "get ready";
+    case "paused": return `can't see ${missing.join(" & ") || "you"}, come back into view`;
+    case "over": {
+      const rematch = !camera ? "hold S" : online() ? "both open your mouth" : "open your mouth";
+      const result = winner < 0 ? "double K.O., it's a draw!" : winner === me ? "you win!" : online() ? "you lose!" : "the computer wins!";
+      return `${result} ${rematch} (or press space) for a rematch`;
+    }
+    default: return camera ? "blink to slash -- open mouth to defend" : "A to slash, S to shield";
+  }
+}
+
+function drawNote() {
+  const { x, y, w, h } = NOTE, path = roundRect(x, y, w, h, 16);
+  if ((phase === "waiting" || phase === "over") && holdT > 0) {
+    ctx.save(); ctx.clip(new Path2D(path));
+    rc.rectangle(x, y, w * clamp(holdT / HOLD_TO_START, 0, 1), h, hatch(50, { hachureGap: 10, fill: "rgba(30,30,30,.35)" }));
+    ctx.restore();
+  }
+  rc.path(path, pen(51, { strokeWidth: 2.2 }));
+  const text = noteText();
+  write(text, x + w / 2, y + h / 2 + 2, text.length > 70 ? 22 : 26);
+}
+
+function drawTuneMeters() {
+  if ($("panel").hidden || input !== "camera") return;
+  const s = sense, x = fighters[me].homeX - 80, w = 160;
+  [["blink", s.eyes, s.blinkOn, s.closed], ["mouth", s.jaw, s.jawOn, s.mouthOpen]].forEach(([name, v, mark, on], r) => {
+    const y = FEET + 6 + r * 13;
+    ctx.fillStyle = "rgba(30,30,30,.12)"; ctx.fillRect(x, y, w, 6);
+    ctx.fillStyle = on ? RED : INK; ctx.fillRect(x, y, w * clamp(v, 0, 1), 6);
+    ctx.fillRect(x + w * clamp(mark, 0, 1) - 1, y - 3, 2, 12);
+    ctx.font = `13px ${FONT}`; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.fillText(name, x - 8, y + 3);
+  });
+}
+
+function draw(now) {
+  ctx.setTransform(view, 0, 0, view, 0, 0);
+  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, W, H);
+  rc.path(roundRect(FRAME.x, FRAME.y, FRAME.w, FRAME.h, FRAME.r), pen(1, { strokeWidth: 2.4 }));
+  drawCorners();
+  drawCenter();
+  ctx.save();
+  if (shake > 0.5) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  [...fighters].sort((a, b) => (b.ko > 0) - (a.ko > 0)).forEach((f) => drawFighter(f, now));
+  drawFx();
+  ctx.restore();
+  drawTuneMeters();
+  drawNote();
+}
+
+function updateCrops() {
+  faces.forEach((face, i) => {
+    if (!face) return;
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const t = { cx: ((face.x0 + face.x1) / 2) * vw, cy: ((face.y0 + face.y1) / 2) * vh, s: Math.max((face.x1 - face.x0) * vw, (face.y1 - face.y0) * vh) * 1.5 };
+    const c = crops[i];
+    crops[i] = c ? { cx: lerp(c.cx, t.cx, 0.3), cy: lerp(c.cy, t.cy, 0.3), s: lerp(c.s, t.s, 0.3) } : t;
+  });
+}
+
+// intro timings
+const CUT = { b: 8.6, c: 15.4, d: 20.8, e: 23.4, title: 27.8, end: 31.4 };
+const LEAP_AT = CUT.e + 0.65, BONK_AT = LEAP_AT + 0.34, LAND_AT = BONK_AT + 0.65, OW_AT = CUT.e + 2.6;
+const BONK = { from: 360, at: 700, back: 440, lift: 155, sword: -15 };
+const BUMP = { x: 888, y: FEET - 412 };
+const LETTERBOX = 86, SANDWICH = { x: 630, y: FEET - 58 };
+const cast = [new Fighter(0), new Fighter(1)];
+cast.forEach((f) => (f.shadow = true));
+let introStart = null;
+
+function endIntro() { phase = "menu"; showUi("menu"); }
+
+function poseCast(t) {
+  const [a, b] = cast;
+  Object.assign(a, { x: BONK.from, state: "idle", lift: 0, swordAt: undefined });
+  Object.assign(b, { x: 900, state: "idle", lift: 0, swordAt: undefined });
+  if (t < CUT.e) return;
+  Object.assign(b, { state: "pose", swordAt: 65 });
+  a.state = "pose";
+  if (t < LEAP_AT) { a.swordAt = lerp(IDLE, -150, easeOut(clamp((t - CUT.e - 0.15) / 0.35, 0, 1))); return; }
+  if (t < BONK_AT) {
+    const u = (t - LEAP_AT) / (BONK_AT - LEAP_AT), k = clamp((u - 0.6) / 0.4, 0, 1);
+    Object.assign(a, { x: lerp(BONK.from, BONK.at, u), lift: BONK.lift * Math.sin((u * Math.PI) / 2), swordAt: lerp(-150, BONK.sword, k * k) });
+    return;
+  }
+  const since = t - BONK_AT, back = clamp((since - 0.2) / (LAND_AT - BONK_AT - 0.2), 0, 1);
+  a.x = lerp(BONK.at, BONK.back, easeOut(back));
+  a.lift = (1 - back) * BONK.lift + 120 * back * (1 - back);
+  a.swordAt = lerp(lerp(BONK.sword, -100, easeOut(clamp((since - 0.12) / 0.14, 0, 1))), IDLE, easeInOut(back));
+  if (t >= LAND_AT) Object.assign(a, { state: "idle", swordAt: undefined });
+}
+
+function introCamera(t) {
+  if (t < CUT.b) {
+    const k = easeOut(clamp(t / 6, 0, 1));
+    return { s: lerp(1.3, 1, k), x: 630, y: lerp(300, 360, k) };
+  }
+  if (t < CUT.c) {
+    const k = easeInOut(clamp((t - 11.4) / 1, 0, 1));
+    return { s: lerp(1.1, 2.7, k), x: 630, y: lerp(215, SANDWICH.y + 10, k) };
+  }
+  const drift = (from) => 0.05 * clamp((t - from) / 5, 0, 1);
+  if (t < CUT.d) return { s: 1.7 + drift(CUT.c), x: cast[1].x - 80, y: 300 };
+  if (t < CUT.e) return { s: 1.7 + drift(CUT.d), x: cast[0].x + 80, y: 300 };
+  const k = easeInOut(clamp((t - LEAP_AT + 0.15) / 0.45, 0, 1));
+  return { s: lerp(0.95, 0.8, k), x: 640, y: lerp(350, 335, k) };
+}
+const toScreen = (cam, x, y) => [(x - cam.x) * cam.s + W / 2, (y - cam.y) * cam.s + H / 2];
+
+function drawSun(x, y, d) {
+  rc.circle(x, y, d, pen(70, { strokeWidth: 2.4, fill: "rgba(30,30,30,.14)", fillStyle: "hachure", hachureGap: 12, hachureAngle: -30 }));
+}
+
+// the sandwich
+function drawSandwich(x, y, sparkle) {
+  const bread = (n, top) => rc.path(roundRect(x - 46, top, 92, 17, 6), pen(n, { fill: "rgba(30,30,30,.22)", fillStyle: "hachure", hachureGap: 5 }));
+  bread(80, y + 8);
+  rc.rectangle(x - 40, y - 2, 80, 8, pen(81, { stroke: RED, fill: RED, fillStyle: "hachure", hachureGap: 4 }));
+  rc.linearPath(Array.from({ length: 13 }, (_, i) => [x - 48 + i * 8, y + 7 + (i % 2 ? 4 : -2)]), pen(82, { strokeWidth: 2.2 }));
+  bread(83, y - 19);
+  rc.line(x + 6, y - 19, x + 2, y - 54, pen(88, { strokeWidth: 2 }));
+  rc.polygon([[x + 2, y - 54], [x + 26, y - 48], [x + 3, y - 41]], pen(89, { stroke: RED, fill: RED, fillStyle: "solid", strokeWidth: 1.6 }));
+  if (sparkle) {
+    [-150, -110, -70, -30].forEach((ang, i) => {
+      const [x0, y0] = polar(ang, 62), [x1, y1] = polar(ang, 80);
+      rc.line(x + x0, y - 10 + y0, x + x1, y - 10 + y1, pen(84 + i, { strokeWidth: 2 }));
+    });
+  }
+}
+
+function drawWorld(t, now) {
+  drawSun(630, 300, 430);
+  const hills = [[-500, 470], [-200, 430], [0, 462], [160, 410], [330, 452], [500, 418], [640, 446], [800, 404],
+                 [980, 450], [1150, 412], [1330, 458], [1560, 425], [1800, 470]];
+  rc.polygon([...hills, [1800, FEET], [-500, FEET]], pen(71, { stroke: FAINT, strokeWidth: 1.8, fill: PAPER, fillStyle: "solid" }));
+  rc.line(-500, FEET + 2, 1800, FEET + 2, pen(72, { strokeWidth: 2.6 }));
+  [120, 470, 790, 1180].forEach((x, i) => rc.linearPath([[x - 10, FEET], [x - 4, FEET - 16], [x, FEET], [x + 6, FEET - 13], [x + 11, FEET]], pen(73 + i, { strokeWidth: 1.6 })));
+  if (t >= CUT.b) {
+    rc.ellipse(SANDWICH.x, FEET - 16, 160, 40, pen(77, { fill: "rgba(30,30,30,.35)", fillStyle: "hachure", hachureGap: 6 }));
+    drawSandwich(SANDWICH.x, SANDWICH.y, t > 11.4 && t < CUT.c);
+  }
+
+  ctx.save(); ctx.strokeStyle = FAINT; ctx.lineWidth = 1.6; ctx.lineCap = "round";
+  for (let i = 0; i < 9; i++) {
+    const y = 140 + ((i * 97) % 380), len = 40 + (i % 3) * 25, x = 1500 - ((t * (120 + i * 18) + i * 260) % 1900);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(x + len / 2, y - 6, x + len, y); ctx.stroke();
+  }
+  ctx.restore();
+
+  cast.forEach((f) => drawFighter(f, now));
+  drawBonk(t);
+}
+
+// bonk on the head
+function drawBonk(t) {
+  const a = cast[0], since = t - BONK_AT;
+  if (t > LEAP_AT && since < 0.15 && (since > 0 || a.swordAt > -146)) {
+    ctx.save(); ctx.globalAlpha = 0.6 * clamp((0.15 - since) / 0.15, 0, 1);
+    const end = (since > 0 ? BONK.sword : a.swordAt) * DEG;
+    for (const [r, n] of [[250, 11], [222, 12], [194, 13]]) {
+      rc.arc(a.x, FEET - a.lift + SHOULDER, r * 2, r * 2, -150 * DEG, end, false, pen(n, { strokeWidth: 1.4, roughness: 1.6 }));
+    }
+    ctx.restore();
+  }
+  if (since < 0) return;
+  if (since < 0.35) {
+    const k = since / 0.35;
+    ctx.save(); ctx.globalAlpha = 1 - k;
+    [-160, -125, -90, -55].forEach((ang, i) => {
+      rc.line(...add([BUMP.x, BUMP.y], polar(ang, 18 + 22 * k)), ...add([BUMP.x, BUMP.y], polar(ang, 38 + 22 * k)), pen(130 + i, { strokeWidth: 2.2 }));
+    });
+    ctx.restore();
+  }
+  const bump = easeOut(clamp((since - 0.14) / 0.2, 0, 1));
+  if (bump > 0) rc.circle(BUMP.x, BUMP.y, 26 * bump, pen(135, { strokeWidth: 3, fill: INK, fillStyle: "solid" }));
+  const show = clamp((since - 0.2) / 0.3, 0, 1);
+  for (let i = 0; show > 0 && i < 3; i++) {
+    const ang = since * 5 + (i * 2 * Math.PI) / 3, size = (0.75 + 0.25 * Math.sin(ang)) * show;
+    const cx = cast[1].x + Math.cos(ang) * 50, cy = FEET - 452 + Math.sin(ang) * 12;
+    const pts = Array.from({ length: 10 }, (_, j) => add([cx, cy], polar(j * 36 - 90 + since * 80, (j % 2 ? 4.5 : 11) * size)));
+    rc.polygon(pts, pen(140 + i, { strokeWidth: 1.6, roughness: 0.5, fill: INK, fillStyle: "solid" }));
+  }
+}
+
+function bubble([ax, ay], lines, times, t, toLeft, size) {
+  if (t < times[0]) return;
+  ctx.font = `${size}px ${FONT}`;
+  const lh = size * 1.3, w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 56, h = lines.length * lh + 30;
+  const bx = toLeft ? ax - 50 - w : ax + 50, by = Math.max(ay - h - 20, LETTERBOX + 12);
+  ctx.save(); ctx.globalAlpha = clamp((t - times[0]) / 0.2, 0, 1);
+  const tail = toLeft ? [[bx + w - 46, by + h - 8], [bx + w - 16, by + h - 8], [ax, ay]] : [[bx + 16, by + h - 8], [bx + 46, by + h - 8], [ax, ay]];
+  rc.polygon(tail, pen(91, { strokeWidth: 2.4, fill: PAPER, fillStyle: "solid" }));
+  rc.path(roundRect(bx, by, w, h, 24), pen(90, { strokeWidth: 2.4, fill: PAPER, fillStyle: "solid" }));
+  ctx.restore();
+  lines.forEach((line, i) => {
+    const a = clamp((t - times[i]) / 0.35, 0, 1);
+    if (a > 0) { ctx.globalAlpha = a; write(line, bx + w / 2, by + 15 + lh * (i + 0.5), size); }
+  });
+  ctx.globalAlpha = 1;
+}
+
+function narrate(text, at, t, y) {
+  if (t < at) return;
+  ctx.font = `24px ${FONT}`; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillStyle = PAPER;
+  const words = text.split(" "), widths = words.map((w) => ctx.measureText(w).width), space = ctx.measureText(" ").width;
+  let x = W / 2 - (widths.reduce((s, w) => s + w, 0) + space * (words.length - 1)) / 2;
+  words.forEach((word, i) => {
+    ctx.globalAlpha = clamp((t - at - i * 0.12) / 0.35, 0, 1);
+    ctx.fillText(word, x, y);
+    x += widths[i] + space;
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawTitle(t) {
+  ctx.globalAlpha = clamp((t - CUT.title) / 0.6, 0, 1);
+  drawSun(640, 330, 330);
+  write("Blink Duel", 640, 320, 120);
+  const u = easeOut(clamp((t - CUT.title - 0.3) / 0.6, 0, 1));
+  if (u > 0) rc.line(400, 392, 400 + 480 * u, 388, pen(120, { strokeWidth: 3 }));
+  ctx.globalAlpha = clamp((t - CUT.title - 0.9) / 0.5, 0, 1);
+  write("blink to slash -- open mouth to defend", 640, 450, 28);
+  ctx.globalAlpha = 1;
+}
+
+// intro cutscene
+function drawIntro(tMs) {
+  if (introStart === null) introStart = tMs;
+  const t = (tMs - introStart) / 1000;
+  if (t >= CUT.end) return endIntro();
+  ctx.setTransform(view, 0, 0, view, 0, 0);
+  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, W, H);
+
+  if (t < CUT.title) {
+    poseCast(t);
+    const cam = introCamera(t);
+    const shake = t >= BONK_AT ? 6 * clamp(1 - (t - BONK_AT) / 0.2, 0, 1) : 0;
+    ctx.save(); ctx.translate(W / 2 + Math.sin(t * 97) * shake, H / 2 + Math.cos(t * 83) * shake);
+    ctx.scale(cam.s, cam.s); ctx.translate(-cam.x, -cam.y);
+    drawWorld(t, tMs / 1000);
+    ctx.restore();
+    const mouth = (f) => toScreen(cam, f.x + f.dir * 22, FEET - 350);
+    if (t >= CUT.c && t < CUT.d) bubble(mouth(cast[1]), ["We could have", "resolved this", "peacefully"], [CUT.c + 0.5, CUT.c + 1.8, CUT.c + 3.2], t, true, 34);
+    if (t >= CUT.d && t < CUT.e) bubble(mouth(cast[0]), ["The sandwich is mine"], [CUT.d + 0.4], t, false, 36);
+    if (t >= OW_AT) {
+      const [x, y] = toScreen(cam, cast[1].x + 84, FEET - 492);
+      ctx.globalAlpha = clamp((t - OW_AT) / 0.15, 0, 1) * clamp((CUT.title - 0.3 - t) / 0.4, 0, 1);
+      write("ow", x, y, 28);
+      ctx.globalAlpha = 1;
+    }
+  } else drawTitle(t);
+
+  const dip = Math.max(1 - t / 0.8, ...[CUT.b, CUT.c, CUT.d, CUT.e, CUT.title].map((c) => 1 - Math.abs(t - c) / 0.22));
+  if (dip > 0) { ctx.globalAlpha = dip; ctx.fillStyle = INK; ctx.fillRect(0, 0, W, H); }
+  ctx.globalAlpha = 1;
+
+  const bh = LETTERBOX * easeOut(clamp(t / 0.7, 0, 1)) * (1 - easeInOut(clamp((t - CUT.end + 0.7) / 0.7, 0, 1)));
+  ctx.fillStyle = INK; ctx.fillRect(0, 0, W, bh); ctx.fillRect(0, H - bh, W, bh);
+  if (t < CUT.b) {
+    narrate("Long ago, there were two warriors, the best of their time", 1.4, t, H - 60);
+    narrate("and peerless except for each other.", 5, t, H - 28);
+  } else if (t < CUT.c) {
+    narrate("There is no war right now,", 9.1, t, H - 60);
+    narrate("these warriors are fighting over a sandwich.", 11, t, H - 28);
+  }
+  if (t > 1 && bh > 30) {
+    ctx.globalAlpha = 0.5; ctx.font = `16px ${FONT}`; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.fillStyle = PAPER;
+    ctx.fillText("click or press any key to skip", W - 24, bh / 2);
+    ctx.globalAlpha = 1;
+  }
+}
+canvas.addEventListener("pointerdown", () => { if (phase === "intro") endIntro(); });
+
+let lastT = performance.now(), checks = 0, checksSince = performance.now();
+// main loop
+function frame(t) {
+  const dt = clamp((t - lastT) / 1000, 0, 0.05);
+  lastT = t;
+  if (tracker && input === "camera" && phase !== "menu" && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    let found = null;
+    try { found = tracker(video, t); } catch (err) { console.error(err); }
+    faces = [null, null]; faces[me] = found;
+    sense.update(found?.scores, t);
+    updateCrops();
+    checks++;
+  }
+  if (t - checksSince > 1000) {
+    $("fps").textContent = input === "camera" ? Math.round((checks * 1000) / (t - checksSince)) : "-";
+    $("ping").textContent = Math.round(net.rtt);
+    $("pingRow").hidden = !online();
+    checks = 0; checksSince = t;
+  }
+  if (phase === "intro") drawIntro(t);
+  else { update(dt); draw(t / 1000); }
+  if (online() && net.fast) sendState(t);
+  requestAnimationFrame(frame);
+}
+resize();
+addEventListener("resize", resize);
+requestAnimationFrame(frame);
+
+let trackerReady = null;
+// turn on webcam
+async function startInput() {
+  try {
+    if (!video.srcObject) {
+      note = "starting the webcam...";
+      video.srcObject = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false,
+      });
+      await video.play();
+    }
+  } catch (err) {
+    video.srcObject = null;
+    if (err.name === "NotFoundError" || err.name === "OverconstrainedError") return "keys";
+    throw err;
+  }
+  note = "loading the face tracker...";
+  trackerReady ??= createTracker().catch((err) => { trackerReady = null; throw err; });
+  tracker = await trackerReady;
+  return "camera";
+}
+
+function startFailed(err) {
+  console.error(err);
+  mode = null; phase = "menu"; showUi("menu");
+  note = err.name === "NotAllowedError"
+    ? "camera blocked. allow it in the address bar and try again"
+    : "couldn't load the face tracker (it needs internet), try again";
+}
+
+// play vs computer
+async function startSolo(keysOnly) {
+  showUi(null); mode = "solo"; me = 0; phase = "loading";
+  fighters.forEach((f) => f.reset());
+  try { input = keysOnly ? "keys" : await startInput(); }
+  catch (err) { return startFailed(err); }
+  if (input === "keys") newMatch();
+  else { phase = "waiting"; holdT = 0; cpuReset(); }
+}
+
+async function startOnline(code) {
+  if (!window.Peer) { note = "couldn't load the online library, check your internet"; return; }
+  showUi(null); mode = "online"; phase = "loading";
+  try { input = await startInput(); }
+  catch (err) { return startFailed(err); }
+  if (code) joinRoom(code); else hostRoom();
+}
+
+function showUi(which) {
+  $("menu").hidden = which !== "menu";
+  $("lobby").hidden = which !== "lobby";
+}
+
+showUi(null);
+$("solo").onclick = () => startSolo(false);
+$("host").onclick = () => startOnline(null);
+const join = () => {
+  const code = $("code").value.trim().toUpperCase();
+  if (!/^[A-Z0-9]{4}$/.test(code)) { note = "type the 4-letter room code first"; return; }
+  startOnline(code);
+};
+$("join").onclick = join;
+$("code").addEventListener("keydown", (e) => { if (e.key === "Enter") join(); });
+$("copyLink").onclick = async () => {
+  const link = `${location.origin}${location.pathname}#${net.code}`;
+  try { await navigator.clipboard.writeText(link); $("copyLink").textContent = "copied!"; }
+  catch { $("copyLink").textContent = link; }
+  setTimeout(() => ($("copyLink").textContent = "copy invite link"), 2000);
+};
+$("cancel").onclick = () => leaveOnline("");
+if (/^#[A-Za-z0-9]{4}$/.test(location.hash)) {
+  $("code").value = location.hash.slice(1).toUpperCase();
+  note = `invited to room ${$("code").value}, press join`;
+}
+addEventListener("pagehide", () => net.peer?.destroy());
+
+// keyboard controls
+const KEYS = { KeyA: "slash", KeyK: "slash", KeyS: "shield", KeyL: "shield" };
+addEventListener("keydown", (e) => {
+  if (phase === "intro") { e.preventDefault(); endIntro(); return; }
+  if (e.target instanceof HTMLInputElement) return;
+  if (e.code === "KeyT") { $("panel").hidden = !$("panel").hidden; return; }
+  if (e.code === "Enter" && phase === "menu") { startSolo(true); return; }
+  if ((e.code === "Space" || e.code === "Enter") && phase === "over") {
+    e.preventDefault();
+    if (online() && !net.isHost) netSend({ k: "rematch" }); else startMatch();
+    return;
+  }
+  const k = KEYS[e.code];
+  if (!k || mode === null) return;
+  if (k === "shield") shieldKeys.add(e.code);
+  else if (!e.repeat && (phase === "fight" || phase === "waiting")) doSlash(me);
+});
+addEventListener("keyup", (e) => shieldKeys.delete(e.code));
+addEventListener("blur", () => shieldKeys.clear());
+
+for (const key of ["blink", "mouth"]) {
+  const el = $(`${key}Sens`), out = $(`${key}Out`);
+  el.value = sens[key]; out.textContent = sens[key];
+  el.oninput = () => {
+    sens[key] = +el.value; out.textContent = el.value;
+    store.set(`${key}Sens`, el.value);
+    sense.recompute();
+  };
+}
+$("recal").onclick = () => {
+  $("panel").hidden = true;
+  if (input === "camera" && (phase === "fight" || phase === "waiting" || phase === "paused")) {
+    phase = "countdown"; phaseT = 0; holdT = 0;
+    sense.startCalibration();
+  }
+};
+</script>
+</body>
+</html>
