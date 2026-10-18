@@ -6,7 +6,7 @@ Play it here: https://shreyeahhs.github.io/blink-duel/
 
 ## Where the idea came from
 
-Made for a hackathon where the rule was: build something fun using only two buttons or two actions. Blinking and opening your mouth are two actions anyone can do without their hands, so those became the controls.
+Made for GUTS hackathon 2026 for the JP Morgan Chase challenge, where the rule was: build something fun using only two buttons or two actions. Blinking and opening your mouth are two actions anyone can do without their hands, so those became the controls.
 
 The screen layout comes from my own sketch, with the health bars up in the corners and a vs circle in the middle. The opening cutscene is inspired by the Shadow Fight intro, where the two warriors are just black silhouettes in front of a huge sun. Except here they're fighting over a sandwich.
 
